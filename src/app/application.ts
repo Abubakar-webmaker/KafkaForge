@@ -22,6 +22,13 @@ export class Application {
   private broker: Broker;
   private lifecycle: LifecycleManager;
   private logger: Logger;
+  
+  /**
+   * Tracks in-flight shutdown operation to prevent concurrent execution
+   * - null: No shutdown in progress
+   * - Promise: Shutdown currently executing, all callers await this promise
+   */
+  private shutdownPromise: Promise<void> | null = null;
 
   constructor(config: Config, broker: Broker, lifecycle: LifecycleManager, logger: Logger) {
     this.config = config;
@@ -92,9 +99,23 @@ export class Application {
 
   /**
    * Stop the application gracefully
+   *
+   * Coordination:
+   * - Only one broker.stop() may execute at a time
+   * - Concurrent callers safely await the same shutdown operation
+   * - If already stopping, subsequent calls await the in-flight operation
+   * - Errors preserve cleanup failure (transitions to FAILED, not STOPPED)
+   *
+   * @throws {LifecycleError} If stop() cannot be initiated from current state,
+   *         or if cleanup fails (transitions to FAILED and throws)
    */
   async stop(): Promise<void> {
-    // Allow stop from RUNNING, INITIALIZED, or FAILED states
+    // If shutdown is already in progress, await it
+    if (this.shutdownPromise !== null) {
+      return this.shutdownPromise;
+    }
+
+    // If not in a state where stop can be initiated, fail immediately
     if (!this.lifecycle.isInAnyState('RUNNING', 'INITIALIZED', 'FAILED')) {
       throw new LifecycleError(
         `Cannot stop from state ${this.lifecycle.getState()}`,
@@ -105,12 +126,32 @@ export class Application {
       );
     }
 
+    // Create the shutdown promise and store it
+    // Multiple concurrent callers will all await this same promise
+    this.shutdownPromise = this._executeShutdown();
+
+    try {
+      await this.shutdownPromise;
+    } finally {
+      // Reset shutdown tracking for future stop attempts
+      // Note: In STOPPED state, further stop() calls will fail the state check above
+      // In FAILED state, further stop() calls will execute shutdown again
+      this.shutdownPromise = null;
+    }
+  }
+
+  /**
+   * Internal shutdown implementation
+   * Only called once per shutdown sequence due to shutdownPromise guard
+   * @private
+   */
+  private async _executeShutdown(): Promise<void> {
     try {
       const timer = startTimer();
       this.lifecycle.transitionTo('STOPPING');
       this.logger.info('Application stopping');
 
-      // Stop broker
+      // Stop broker - only executes once due to shutdownPromise guard
       await this.broker.stop();
       this.logger.debug('Broker stopped');
 
