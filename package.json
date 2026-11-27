@@ -1,0 +1,40 @@
+{
+  "name": "kafkaforge",
+  "version": "0.1.0",
+  "description": "A distributed event streaming platform inspired by Kafka, built entirely in TypeScript using Node.js",
+  "main": "./dist/index.js",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "clean": "if exist dist rmdir /s /q dist & exit /b 0 || exit /b 0",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run clean && tsc && tsc --project tsconfig.test.json",
+    "dev": "node --loader ts-node/esm --no-warnings=ExperimentalWarning src/index.ts",
+    "start": "node dist/index.js",
+    "test": "npm run build && node scripts/run-tests.js",
+    "test:watch": "npm run build && node --watch scripts/run-tests.js",
+    "test:coverage": "npm run build && node --test --experimental-test-coverage dist/tests/unit/config/config.test.js dist/tests/unit/errors/errors.test.js dist/tests/unit/logging/logger.test.js dist/tests/unit/utils/id.test.js dist/tests/unit/utils/time.test.js dist/tests/unit/lifecycle/lifecycle.test.js dist/tests/unit/broker/broker.test.js dist/tests/integration/application/lifecycle.test.js",
+    "lint:check": "echo 'Manual linting via TypeScript strict mode'"
+  },
+  "keywords": [
+    "kafka",
+    "distributed-systems",
+    "event-streaming",
+    "message-broker",
+    "typescript"
+  ],
+  "author": "",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^20.10.6",
+    "typescript": "^5.3.3"
+  }
+}
