@@ -17,6 +17,7 @@ import { Broker } from '../src/broker/broker.js';
 import { LifecycleManager } from '../src/app/lifecycle.js';
 import { Logger } from '../src/logging/logger.js';
 import { InitializationError } from '../src/errors/initialization-error.js';
+import { LifecycleError } from '../src/errors/lifecycle-error.js';
 import { loadConfiguration } from '../src/config/config.js';
 import { parseArgs } from '../src/cli/index.js';
 
@@ -182,6 +183,124 @@ describe('Fixes - Phase 1 Critical Issues', () => {
       // Load config with the parsed log level
       const config = loadConfiguration(args.logLevel);
       assert.equal(config.logLevel, 'DEBUG', 'Should apply parsed log level to config');
+    });
+  });
+
+  describe('Concurrent Shutdown Coordination', () => {
+    it('Two concurrent stop() calls should coordinate properly', async () => {
+      const config = loadConfiguration();
+      const brokerConfig = { brokerId: 'test-broker', host: 'localhost', port: 9092 };
+      const broker = new Broker(brokerConfig);
+      const lifecycle = new LifecycleManager();
+      const logger = new Logger('INFO', { applicationName: 'test' });
+
+      const app = new Application(config, broker, lifecycle, logger);
+      await app.initialize();
+      await app.start();
+
+      // Track how many times broker.stop() is called
+      let brokerStopCount = 0;
+      const originalStop = broker.stop;
+      broker.stop = async () => {
+        brokerStopCount++;
+        await originalStop.call(broker);
+      };
+
+      // Start two concurrent stop() calls
+      const stop1 = app.stop();
+      const stop2 = app.stop();
+
+      // Both should complete without error
+      await Promise.all([stop1, stop2]);
+
+      // broker.stop() should have been called exactly once
+      assert.equal(brokerStopCount, 1, 'broker.stop() must execute exactly once');
+      assert.equal(app.getState(), 'STOPPED');
+    });
+
+    it('Multiple concurrent stop() calls should all coordinate safely', async () => {
+      const config = loadConfiguration();
+      const brokerConfig = { brokerId: 'test-broker', host: 'localhost', port: 9092 };
+      const broker = new Broker(brokerConfig);
+      const lifecycle = new LifecycleManager();
+      const logger = new Logger('INFO', { applicationName: 'test' });
+
+      const app = new Application(config, broker, lifecycle, logger);
+      await app.initialize();
+      await app.start();
+
+      let brokerStopCount = 0;
+      const originalStop = broker.stop;
+      broker.stop = async () => {
+        brokerStopCount++;
+        await originalStop.call(broker);
+      };
+
+      // Start 5 concurrent stop() calls
+      const promises = [];
+      for (let i = 0; i < 5; i++) {
+        promises.push(app.stop());
+      }
+
+      await Promise.all(promises);
+
+      assert.equal(brokerStopCount, 1, 'broker.stop() must execute exactly once despite 5 concurrent calls');
+      assert.equal(app.getState(), 'STOPPED');
+    });
+
+    it('Second stop() after successful shutdown should fail', async () => {
+      const config = loadConfiguration();
+      const brokerConfig = { brokerId: 'test-broker', host: 'localhost', port: 9092 };
+      const broker = new Broker(brokerConfig);
+      const lifecycle = new LifecycleManager();
+      const logger = new Logger('INFO', { applicationName: 'test' });
+
+      const app = new Application(config, broker, lifecycle, logger);
+      await app.initialize();
+      await app.start();
+      await app.stop();
+
+      assert.equal(app.getState(), 'STOPPED');
+
+      // Second stop() should fail
+      try {
+        await app.stop();
+        assert.fail('Should have thrown');
+      } catch (error) {
+        assert(error instanceof LifecycleError);
+        assert(error.message.includes('Cannot stop from state STOPPED'));
+      }
+    });
+
+    it('Concurrent failure during shutdown should propagate to all callers', async () => {
+      const config = loadConfiguration();
+      const brokerConfig = { brokerId: 'test-broker', host: 'localhost', port: 9092 };
+      const broker = new Broker(brokerConfig);
+      const lifecycle = new LifecycleManager();
+      const logger = new Logger('INFO', { applicationName: 'test' });
+
+      const app = new Application(config, broker, lifecycle, logger);
+      await app.initialize();
+      await app.start();
+
+      // Mock broker.stop() to fail
+      broker.stop = async () => {
+        throw new Error('Broker failure');
+      };
+
+      // Start 3 concurrent stop() calls
+      const stop1 = app.stop().catch(err => ({ error: err }));
+      const stop2 = app.stop().catch(err => ({ error: err }));
+      const stop3 = app.stop().catch(err => ({ error: err }));
+
+      const [result1, result2, result3] = await Promise.all([stop1, stop2, stop3]);
+
+      // All should receive the error
+      assert(result1.error instanceof LifecycleError);
+      assert(result2.error instanceof LifecycleError);
+      assert(result3.error instanceof LifecycleError);
+
+      assert.equal(app.getState(), 'FAILED');
     });
   });
 });
